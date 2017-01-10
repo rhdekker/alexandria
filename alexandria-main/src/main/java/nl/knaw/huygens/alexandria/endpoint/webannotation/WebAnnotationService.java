@@ -1,5 +1,27 @@
 package nl.knaw.huygens.alexandria.endpoint.webannotation;
 
+/*
+ * #%L
+ * alexandria-main
+ * =======
+ * Copyright (C) 2015 - 2016 Huygens ING (KNAW)
+ * =======
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as
+ * published by the Free Software Foundation, either version 3 of the
+ * License, or (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public
+ * License along with this program.  If not, see
+ * <http://www.gnu.org/licenses/gpl-3.0.html>.
+ * #L%
+ */
+
 import static nl.knaw.huygens.alexandria.api.w3c.WebAnnotationConstants.OA_HAS_SOURCE_IRI;
 import static nl.knaw.huygens.alexandria.api.w3c.WebAnnotationConstants.OA_HAS_TARGET_IRI;
 import static nl.knaw.huygens.alexandria.api.w3c.WebAnnotationConstants.WEBANNOTATION_TYPE;
@@ -50,6 +72,8 @@ public class WebAnnotationService {
 
   public WebAnnotation validateAndStore(WebAnnotationPrototype prototype) {
     try {
+      //NOTE: Er wordt hier aan serialisatie en deserialisatie gedaan.
+      //Schaalbaarheid (CPU): Mogelijk performance probleem.
       String json = new ObjectMapper().writeValueAsString(prototype);
       Map<String, Object> jsonObject = (Map<String, Object>) JsonUtils.fromString(json);
 
@@ -60,8 +84,8 @@ public class WebAnnotationService {
       jsonObject.put("@id", webAnnotationURI(annotation.getId()));
       String json2 = new ObjectMapper().writeValueAsString(jsonObject);
       return new WebAnnotation(annotation.getId())//
-          .setJson(json2)//
-          .setETag(String.valueOf(prototype.getModified().hashCode()));
+        .setJson(json2)//
+        .setETag(String.valueOf(prototype.getModified().hashCode()));
 
     } catch (IOException | JsonLdError e) {
       throw new BadRequestException(e.getMessage());
@@ -71,9 +95,9 @@ public class WebAnnotationService {
 
   URI webAnnotationURI(UUID annotationUUID) {
     return UriBuilder.fromUri(config.getBaseURI())//
-        .path(EndpointPaths.WEB_ANNOTATIONS)//
-        .path(annotationUUID.toString())//
-        .build();
+      .path(EndpointPaths.WEB_ANNOTATIONS)//
+      .path(annotationUUID.toString())//
+      .build();
   }
 
   private String extractResourceRef(Map<String, Object> jsonObject) throws JsonLdError {
@@ -100,23 +124,35 @@ public class WebAnnotationService {
   private AlexandriaResource extractAlexandriaResource(String resourceRef) {
     TentativeAlexandriaProvenance provenance = new TentativeAlexandriaProvenance(ThreadContext.getUserName(), Instant.now(), AlexandriaProvenance.DEFAULT_WHY);
     // first see if there's already a resource with this ref, if so, use this.
+    // Performance (IO): er wordt altijd een query gedaan naar annotaties met een bepaalde resource ref.
+    // Annotaties worden opgehaald etc. Terwijl de code alleen maar wil weten of er een
+    // resource bestaat met een bepaalde resourceRef. Dat moet simpeler kunnen.
+    // Performance (CPU): Bovendien zijn bepaalde delen van de AlexandriaQuery opgebouwd uit Strings die dan weer geparsed en verwerkt
+    // moeten worden.
+    // Performance (Caching) Een andere vraag is of niet heel veel annotaties in dezelfde batch
+    // betrekking hebben opdezelfde resource of een beperkt aantal resources.
+    // Een cache van bijvoorbeeld de laatste tien resources in een ThreadLocal zou hier al heel veel kunnen
+    // helpen.
     UUID resourceUUID;
     AlexandriaQuery query = new AlexandriaQuery()//
-        .setPageSize(2)//
-        .setFind("annotation")//
-        .setWhere("resource.ref:eq(\"" + resourceRef + "\")")//
-        .setReturns(QueryField.resource_id.externalName());
+      .setPageSize(2)//
+      .setFind("annotation")//
+      .setWhere("resource.ref:eq(\"" + resourceRef + "\")")//
+      .setReturns(QueryField.resource_id.externalName());
 
     List<Map<String, Object>> results = service.execute(query).getResults();
     if (results.isEmpty()) {
       resourceUUID = UUID.randomUUID();
+      // Performance (IO): service.createOrUpdate doet altijd een read voor een write.
+      // Is het een idee om een service.createResource te maken waarin ook de randomUUID wordt aangemaakt?
       service.createOrUpdateResource(resourceUUID, resourceRef, provenance, AlexandriaState.CONFIRMED);
-
+      // Performance (IO): hier staat geen return, wat betekent dat na een create alsnog altijd de read
+      // onderaan de functie wordt uitgevoerd. Dat lijkt mij overbodig.
     } else {
       String resourceId = (String) results.get(0).get(QueryField.resource_id.externalName());
       resourceUUID = UUID.fromString(resourceId);
     }
-
+    // Performance (IO): zie een paar regels naar boven: er wordt altijd een read uitgevoerd, ook na een create
     return service.readResource(resourceUUID).get();
   }
 
